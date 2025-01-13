@@ -1,9 +1,10 @@
-import streamlit as st
 from dotenv import load_dotenv
 import os
+from dotenv import load_dotenv
 import azure.cognitiveservices.speech as speech_sdk
 from transformers import pipeline
-from translation import translate_text  # Ensure translation.py is included in your project
+from translation import translate_text  # Import the translation function from translation.py
+from datetime import datetime  # Import datetime for real-time greetings
 
 def load_environment_variables():
     """Load environment variables from .env file."""
@@ -13,10 +14,21 @@ def load_environment_variables():
         "speech_region": os.getenv("SPEECH_REGION"),
     }
 
+def initialize_speech_services(config):
+    """Initialize speech recognizer and synthesizer."""
+    speech_config = speech_sdk.SpeechConfig(subscription=config['speech_key'], region=config['speech_region'])
+    synthesizer = speech_sdk.SpeechSynthesizer(speech_config=speech_config)
+    recognizer = speech_sdk.SpeechRecognizer(speech_config=speech_config)
+    return recognizer, synthesizer, speech_config
+
+# Initialize Hugging Face model
+qa_pipeline = pipeline("text2text-generation", model="google/flan-t5-base")
+
 def get_faq_response(question):
-    """Match the user's question with the FAQ database and return an answer."""
+    """
+    Generate a response to the question using predefined FAQs or Hugging Face model.
+    """
     faq_database = {
-        # English FAQs
         "what is your return policy": "Our return policy allows returns within 30 days of purchase.",
         "how can i track my order": "You can track your order through the 'My Orders' section on our website.",
         "what payment methods do you accept": "We accept credit/debit cards, PayPal, and other online payment options.",
@@ -37,8 +49,6 @@ def get_faq_response(question):
         "what should i do if i didn’t receive my order": "If your order hasn’t arrived, please contact customer service for assistance.",
         "how do i report a problem with my order": "Please contact customer service to report any issues with your order.",
         "can i speak to a customer care agent": "Yes, you can contact our customer care team via phone, email, or live chat.",
-
-        # Simple Gesture Questions
         "hello": "Hi there! How can I assist you today?",
         "good morning": "Good morning! I hope you have a wonderful day ahead. How can I help you?",
         "good evening": "Good evening! How was your day? Let me know how I can assist you.",
@@ -51,91 +61,155 @@ def get_faq_response(question):
         "how is the weather": "I'm not sure, but you can check the weather app for accurate updates."
     }
 
-    # Normalize input question
     normalized_question = question.lower().strip()
+    response = faq_database.get(normalized_question)
 
-    # Check for direct match
-    if normalized_question in faq_database:
-        return faq_database[normalized_question]
+    if response:
+        return response
 
-    # Fallback: Check for similar questions
-    for key in faq_database.keys():
-        if key in normalized_question or normalized_question in key:
-            return faq_database[key]
+    try:
+        response = qa_pipeline(question, max_length=150, do_sample=False)
+        return response[0]['generated_text']
+    except Exception as e:
+        print(f"Error with Hugging Face model: {e}")
+        return None
 
-    return "I'm sorry, I don't have an answer for that question."
-
-# Load environment variables
-config = load_environment_variables()
-
-# Configure Azure Speech Services
-speech_config = speech_sdk.SpeechConfig(subscription=config['speech_key'], region=config['speech_region'])
-synthesizer = speech_sdk.SpeechSynthesizer(speech_config=speech_config)
-recognizer = speech_sdk.SpeechRecognizer(speech_config=speech_config)
-
-def synthesize_response(response, language_code):
-    """Synthesize speech response in the selected language."""
-    voices = {
-        'en': 'en-US-AriaNeural',      # English
-        'hi': 'hi-IN-MadhurNeural',    # Hindi
-        'mr': 'mr-IN-AarohiNeural',    # Marathi
-        'es': 'es-ES-ElviraNeural',    # Spanish
-        'fr': 'fr-FR-HenriNeural',     # French
-        'ja': 'ja-JP-NanamiNeural'     # Japanese
-    }
-    
-    if language_code in voices:
-        speech_config.speech_synthesis_voice_name = voices[language_code]
-        localized_synthesizer = speech_sdk.SpeechSynthesizer(speech_config=speech_config)
-        localized_synthesizer.speak_text_async(response).get()
-
-def recognize_speech():
+def recognize_speech(recognizer):
     """Recognize speech input and handle errors."""
+    print("Listening... (Say 'quit' to exit chatbot)")
     result = recognizer.recognize_once_async().get()
     if result.reason == speech_sdk.ResultReason.RecognizedSpeech:
-        return result.text.strip()
+        return result.text.strip(".!?\n ")
     elif result.reason == speech_sdk.ResultReason.NoMatch:
-        st.error("No speech recognized. Please try again.")
+        print("No speech recognized. Please try again.")
+        return None
     else:
-        st.error(f"Speech recognition error: {result.reason}")
-    return None
+        print(f"Speech recognition error: {result.reason}")
+        return None
 
-st.title("Multilingual Customer Care Chatbot")
-st.write("Welcome! Ask your questions by typing or speaking them below. You can also switch languages.")
+def get_real_time_greeting():
+    """Get a greeting based on the current time."""
+    current_hour = datetime.now().hour
+    if 5 <= current_hour < 12:
+        return "Good morning! How can I assist you?"
+    elif 12 <= current_hour < 18:
+        return "Good afternoon! How can I assist you?"
+    else:
+        return "Good evening! How can I assist you?"
 
-# Language selection
-language_code = st.selectbox("Select your preferred language:", ["en", "hi", "mr", "fr", "es", 'ja'], format_func=lambda x: {
-    'en': 'English',
-    'hi': 'Hindi',
-    'mr': 'Marathi',
-    'es': 'Spanish',
-    'fr': 'French',
-    'ja': 'Japanese'
-}[x])
+def chatbot_interaction(config):
+    """Main interaction loop for the chatbot."""
+    recognizer, synthesizer, speech_config = initialize_speech_services(config)
 
-# Input mode selection
-input_mode = st.radio("Choose your input method:", ("Type", "Speak"))
+    voices = {
+        "en": ("en-US-AriaNeural", "English"),
+        "hi": ("hi-IN-MadhurNeural", "Hindi"),
+        "mr": ("mr-IN-AarohiNeural", "Marathi"),
+        "fr": ("fr-FR-HenriNeural", "French"),
+        "es": ("es-ES-ElviraNeural", "Spanish"),
+        "ja": ("ja-JP-NanamiNeural", "Japanese"),
+        "ko": ("ko-KR-SunHiNeural", "Korean")
+    }
 
-user_text = ""
-if input_mode == "Type":
-    user_text = st.text_input("Type your question here:")
-elif input_mode == "Speak":
-    if st.button("Start Speaking"):
-        st.info("Listening...")
-        user_text = recognize_speech()
+    print("Welcome to the Customer Care Chatbot!")
+    print("You can either speak or type your question. Type or say 'quit' to exit.")
 
-if user_text:
-    st.write(f"You said: {user_text}")
-    
-    with st.spinner('Generating response...'):
+    preferred_language = "en"  # Default language is English
+    speech_config.speech_synthesis_voice_name = voices[preferred_language][0]
+    volume = 75  # Default volume level
+
+    mode = None
+    while True:
+        if not mode:
+            mode = input("Would you like to speak or write your question? (Type 'speak' or 'write'): ").strip().lower()
+
+            if mode == "quit":
+                print("Chatbot: Goodbye!")
+                synthesizer.speak_text_async("Thank you! Have a nice day!").get()
+                break
+
+            if mode == "speak":
+                print("Available languages: en (English), hi (Hindi), mr (Marathi), fr (French), es (Spanish)")
+                language_input = input("Select your preferred language code for responses: ").strip().lower()
+                if language_input in voices:
+                    preferred_language = language_input
+                    language_name = voices[language_input][1]
+                    print(f"Language set to {language_name} ({language_input})")
+                    synthesizer.speak_text_async(f"Language set to {language_name}.").get()
+                    speech_config.speech_synthesis_voice_name = voices[preferred_language][0]
+                else:
+                    print("Invalid language code. Defaulting to English.")
+                    preferred_language = "en"
+
+            if mode not in ["speak", "write"]:
+                print("Invalid choice. Please type 'speak' or 'write'.")
+                mode = None
+                continue
+
+        # Volume adjustment option
+        adjust_volume = input("Would you like to adjust the volume? (Type 'yes' to adjust, 'no' to continue): ").strip().lower()
+        if adjust_volume == "yes":
+            try:
+                volume = int(input("Set the volume level (0-100, default is 75): ").strip())
+                volume = max(0, min(100, volume))  # Ensure volume is within valid range
+                speech_config.speech_synthesis_volume = volume
+                print(f"Volume set to {volume}.")
+            except ValueError:
+                print("Invalid input. Volume remains unchanged.")
+
+        if mode == "speak":
+            user_text = recognize_speech(recognizer)
+            if user_text is None:
+                continue
+            if user_text.lower() == "quit":
+                print("Exiting chatbot. Goodbye!")
+                synthesizer.speak_text_async("Goodbye! Thank you for using the chatbot.").get()
+                exit()
+            print(f"You said: {user_text}")
+
+        elif mode == "write":
+            user_text = input("You: ").strip(".!?\n ")
+            if user_text.lower() == "quit":
+                print("Chatbot: Goodbye!")
+                synthesizer.speak_text_async("Thank you! Have a nice day!").get()
+                break
+            print(f"You wrote: {user_text}")
+
+        # Check for greetings and respond with real-time greeting
+        if user_text.lower() in ["good morning", "good afternoon", "good evening", "hello", "hi"]:
+            greeting_response = get_real_time_greeting()
+
+            if preferred_language != "en":
+                greeting_response = translate_text(greeting_response, preferred_language)
+
+            print(f"Chatbot: {greeting_response}")
+            localized_synthesizer = speech_sdk.SpeechSynthesizer(speech_config=speech_config)
+            localized_synthesizer.speak_text_async(greeting_response).get()
+            continue
+
+        # Get FAQ response
         response = get_faq_response(user_text)
 
-        if response:
-            # Translate if necessary
-            if language_code != 'en':
-                response = translate_text(response, language_code)
+        if not response:
+            if mode == "speak":
+                response = "That question seems incorrect. Please try rephrasing it."
+                print(f"Chatbot: {response}")
+                synthesizer.speak_text_async(response).get()
+            elif mode == "write":
+                response = "That question seems incorrect. Please correct it and try again."
+                print(f"Chatbot: {response}")
+            continue
 
-            st.success(f"Chatbot: {response}")
-            synthesize_response(response, language_code)
-        else:
-            st.error("Unable to generate a response. Please try rephrasing your question.")
+        if preferred_language != "en":
+            response = translate_text(response, preferred_language)
+
+        localized_synthesizer = speech_sdk.SpeechSynthesizer(speech_config=speech_config)
+        localized_synthesizer.speak_text_async(response).get()
+        print(f"Chatbot Response ({voices[preferred_language][1]}): {response}")
+
+    print("Chatbot session ended.")
+
+
+if __name__ == "_main_":
+    config = load_environment_variables()
+    chatbot_interaction(config)
